@@ -1,0 +1,221 @@
+
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Interactive Terminal</title>
+    <style>
+        body {
+            font-family: monospace;
+            background-color: #1e1e1e;
+            color: #f0f0f0;
+            margin: 0;
+            padding: 20px;
+        }
+        #terminal {
+            background-color: #252526;
+            border: 1px solid #333;
+            height: 400px;
+            overflow-y: auto;
+            padding: 10px;
+            margin-bottom: 10px;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+        #command-line {
+            display: flex;
+            margin-bottom: 10px;
+        }
+        #command-input {
+            flex: 1;
+            background-color: #252526;
+            color: #f0f0f0;
+            border: 1px solid #333;
+            padding: 8px;
+            font-family: monospace;
+        }
+        #cwd-input {
+            width: 250px;
+            background-color: #252526;
+            color: #f0f0f0;
+            border: 1px solid #333;
+            padding: 8px;
+            font-family: monospace;
+            margin-right: 10px;
+        }
+        button {
+            background-color: #0e639c;
+            color: white;
+            border: none;
+            padding: 8px 12px;
+            margin-left: 10px;
+            cursor: pointer;
+        }
+        button:hover {
+            background-color: #1177bb;
+        }
+        .success {
+            color: #6A9955;
+        }
+        .error {
+            color: #F14C4C;
+        }
+        .command {
+            color: #DCDCAA;
+            font-weight: bold;
+        }
+        .loading {
+            color: #569CD6;
+        }
+        h1 {
+            color: #569CD6;
+        }
+        .quick-command {
+            margin: 5px;
+            padding: 6px 10px;
+            background-color: #2d2d2d;
+            border: 1px solid #3e3e3e;
+            color: #dcdcaa;
+            cursor: pointer;
+        }
+        .quick-command:hover {
+            background-color: #3e3e3e;
+        }
+        #quick-commands {
+            margin-bottom: 15px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Interactive Terminal</h1>
+    
+    <div id="quick-commands">
+        <h3>Quick Commands:</h3>
+        <button class="quick-command" onclick="setCommand('huggingface-cli login')">HF Login</button>
+        <button class="quick-command" onclick="setCommand('python run_finetuning.py --use_8bit')">Run Finetuning (8-bit)</button>
+        <button class="quick-command" onclick="setCommand('python run_finetuning.py')">Run Finetuning</button>
+        <button class="quick-command" onclick="setCommand('nvidia-smi')">Check GPU (nvidia-smi)</button>
+        <button class="quick-command" onclick="setCommand('dir')">List Files (dir)</button>
+        <button class="quick-command" onclick="clearTerminal()">Clear Terminal</button>
+    </div>
+    
+    <div id="terminal"></div>
+    
+    <div id="command-line">
+        <input type="text" id="cwd-input" placeholder="Working directory" value="">
+        <input type="text" id="command-input" placeholder="Enter command...">
+        <button onclick="runCommand()">Run</button>
+    </div>
+    
+    <script>
+        // Set initial working directory
+        document.getElementById('cwd-input').value = window.location.pathname.substring(0, window.location.pathname.lastIndexOf('/'));
+        
+        // Helper function to append text to terminal with specified class
+        function appendToTerminal(text, className) {
+            const terminal = document.getElementById('terminal');
+            const element = document.createElement('div');
+            element.className = className || '';
+            element.textContent = text;
+            terminal.appendChild(element);
+            terminal.scrollTop = terminal.scrollHeight;
+        }
+        
+        // Clear the terminal
+        function clearTerminal() {
+            document.getElementById('terminal').innerHTML = '';
+            fetch('/clear_results', { method: 'GET' });
+        }
+        
+        // Set command in the input field
+        function setCommand(cmd) {
+            document.getElementById('command-input').value = cmd;
+        }
+        
+        // Run a command
+        function runCommand() {
+            const commandInput = document.getElementById('command-input');
+            const cwdInput = document.getElementById('cwd-input');
+            const command = commandInput.value.trim();
+            const cwd = cwdInput.value.trim() || '.';
+            
+            if (!command) return;
+            
+            appendToTerminal(`$ ${command}`, 'command');
+            
+            fetch('/run_command', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ command, cwd }),
+            })
+            .then(response => response.json())
+            .then(data => {
+                const commandId = data.command_id;
+                appendToTerminal(`Running command (ID: ${commandId})...`, 'loading');
+                
+                // Clear the input
+                commandInput.value = '';
+                
+                // Poll for results
+                pollForResults();
+            });
+        }
+        
+        // Poll for command results
+        function pollForResults() {
+            fetch('/poll_results')
+                .then(response => response.json())
+                .then(data => {
+                    const results = data.results;
+                    const pendingCommands = data.pending;
+                    
+                    // Display results for completed commands
+                    Object.keys(results).forEach(cmdId => {
+                        const result = results[cmdId];
+                        
+                        // Only process completed or error results
+                        if (result.status === 'completed' || result.status === 'error') {
+                            if (result.stdout && result.stdout.trim()) {
+                                appendToTerminal(result.stdout.trim());
+                            }
+                            
+                            if (result.stderr && result.stderr.trim()) {
+                                appendToTerminal(result.stderr.trim(), 'error');
+                            }
+                            
+                            if (result.exitcode !== null) {
+                                const statusClass = result.exitcode === 0 ? 'success' : 'error';
+                                appendToTerminal(`Exit code: ${result.exitcode}`, statusClass);
+                            }
+                            
+                            if (result.error) {
+                                appendToTerminal(`Error: ${result.error}`, 'error');
+                            }
+                            
+                            // Delete this result to avoid duplicates
+                            delete results[cmdId];
+                        }
+                    });
+                    
+                    // Continue polling if there are pending commands or running results
+                    const hasRunningCommands = Object.values(results).some(r => r.status === 'running');
+                    
+                    if (hasRunningCommands || pendingCommands.length > 0) {
+                        setTimeout(pollForResults, 1000);
+                    }
+                });
+        }
+        
+        // Event listener for Enter key
+        document.getElementById('command-input').addEventListener('keypress', function(event) {
+            if (event.key === 'Enter') {
+                runCommand();
+            }
+        });
+        
+        // Initial poll for any existing results
+        pollForResults();
+    </script>
+</body>
+</html>

@@ -15,7 +15,10 @@ from peft import PeftModel, prepare_model_for_kbit_training
 import evaluate
 from typing import Dict, List, Any
 from config import Config
-from bitsandbytes.configs import BitsAndBytesConfig
+try:
+    from bitsandbytes.configs import BitsAndBytesConfig
+except ImportError:
+    from bitsandbytes import BitsAndBytesConfig
 import logging
 
 # Set up logging

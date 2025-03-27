@@ -29,9 +29,13 @@ def load_test_data(test_file: str) -> Dataset:
     return test_dataset
 
 def load_model_and_tokenizer(model_path: str, base_model_name: str = Config.MODEL_NAME):
-    """Load the fine-tuned model and tokenizer."""
+    """Load the fine-tuned model and tokenizer with proper token embedding handling."""
     # Load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(model_path)
+    
+    # Make sure pad token exists, or add it
+    if tokenizer.pad_token is None:
+        tokenizer.add_special_tokens({"pad_token": "[PAD]"})
     
     # Load base model
     print(f"Loading model on {Config.DEVICE}")
@@ -42,6 +46,7 @@ def load_model_and_tokenizer(model_path: str, base_model_name: str = Config.MODE
             device_map="auto",
             trust_remote_code=True
         )
+        base_model = prepare_model_for_kbit_training(base_model)
     else:
         # CPU-friendly loading
         base_model = AutoModelForCausalLM.from_pretrained(
@@ -51,8 +56,39 @@ def load_model_and_tokenizer(model_path: str, base_model_name: str = Config.MODE
             trust_remote_code=True
         ).to(Config.DEVICE)
     
+    # Resize token embeddings to match tokenizer
+    original_vocab_size = base_model.get_input_embeddings().weight.size(0)
+    tokenizer_vocab_size = len(tokenizer)
+    
+    if original_vocab_size != tokenizer_vocab_size:
+        print(f"Resizing token embeddings: {original_vocab_size} -> {tokenizer_vocab_size}")
+        base_model.resize_token_embeddings(tokenizer_vocab_size)
+    
+    # Ensure the model's vocab size matches the tokenizer's
+    assert base_model.get_input_embeddings().weight.size(0) == len(tokenizer)
+    assert base_model.get_output_embeddings().weight.size(0) == len(tokenizer)
+    
     # Load PEFT model with LoRA adapters
-    model = PeftModel.from_pretrained(base_model, model_path)
+    try:
+        model = PeftModel.from_pretrained(base_model, model_path)
+    except Exception as e:
+        print(f"Error loading PEFT model: {e}")
+        print("Attempting to load model with different quantization settings...")
+        
+        # Try loading without 8-bit quantization
+        base_model = AutoModelForCausalLM.from_pretrained(
+            base_model_name,
+            low_cpu_mem_usage=True,
+            torch_dtype=torch.float32,
+            trust_remote_code=True
+        ).to(Config.DEVICE)
+        
+        # Resize token embeddings again
+        base_model.resize_token_embeddings(tokenizer_vocab_size)
+        
+        # Try loading PEFT model again
+        model = PeftModel.from_pretrained(base_model, model_path)
+    
     model.eval()
     
     return model, tokenizer

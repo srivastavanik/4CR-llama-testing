@@ -11,10 +11,11 @@ import numpy as np
 from tqdm import tqdm
 from datasets import Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from peft import PeftModel
+from peft import PeftModel, prepare_model_for_kbit_training
 import evaluate
 from typing import Dict, List, Any
 from config import Config
+from bitsandbytes.configs import BitsAndBytesConfig
 
 # Load evaluation metrics
 bleu = evaluate.load("sacrebleu")
@@ -37,15 +38,24 @@ def load_model_and_tokenizer(model_path: str, base_model_name: str = Config.MODE
     if tokenizer.pad_token is None:
         tokenizer.add_special_tokens({"pad_token": "[PAD]"})
     
-    # Load base model
+    # Load base model with proper quantization
     print(f"Loading model on {Config.DEVICE}")
     if torch.cuda.is_available():
+        # Create quantization config
+        quantization_config = BitsAndBytesConfig(
+            load_in_8bit=True,
+            llm_int8_threshold=6.0,
+            llm_int8_has_fp16_weight=False
+        )
+        
         base_model = AutoModelForCausalLM.from_pretrained(
             base_model_name,
-            load_in_8bit=True,
+            quantization_config=quantization_config,
             device_map="auto",
             trust_remote_code=True
         )
+        
+        # Prepare model for k-bit training
         base_model = prepare_model_for_kbit_training(base_model)
     else:
         # CPU-friendly loading
@@ -75,7 +85,7 @@ def load_model_and_tokenizer(model_path: str, base_model_name: str = Config.MODE
         print(f"Error loading PEFT model: {e}")
         print("Attempting to load model with different quantization settings...")
         
-        # Try loading without 8-bit quantization
+        # Try loading without quantization
         base_model = AutoModelForCausalLM.from_pretrained(
             base_model_name,
             low_cpu_mem_usage=True,

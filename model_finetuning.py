@@ -97,8 +97,17 @@ def load_model_and_tokenizer(model_name: str, use_8bit: bool = False):
             trust_remote_code=True
         ).to(Config.DEVICE)
     
-    # Resize token embeddings if needed
-    model.resize_token_embeddings(len(tokenizer))
+    # Resize token embeddings to match tokenizer
+    original_vocab_size = model.get_input_embeddings().weight.size(0)
+    tokenizer_vocab_size = len(tokenizer)
+    
+    if original_vocab_size != tokenizer_vocab_size:
+        print(f"Resizing token embeddings: {original_vocab_size} -> {tokenizer_vocab_size}")
+        model.resize_token_embeddings(tokenizer_vocab_size)
+    
+    # Ensure the model's vocab size matches the tokenizer's
+    assert model.get_input_embeddings().weight.size(0) == len(tokenizer)
+    assert model.get_output_embeddings().weight.size(0) == len(tokenizer)
     
     return model, tokenizer
 
@@ -162,7 +171,7 @@ def train_model(model, tokenizer, train_dataset, val_dataset, output_dir: str):
         weight_decay=Config.WEIGHT_DECAY,
         num_train_epochs=Config.NUM_EPOCHS,
         per_device_train_batch_size=Config.BATCH_SIZE,
-        per_device_eval_batch_size=Config.EVAL_BATCH_SIZE,
+        per_device_eval_batch_size=Config.BATCH_SIZE,  # Use same batch size for evaluation
         gradient_accumulation_steps=Config.GRADIENT_ACCUMULATION_STEPS,
         evaluation_strategy="epoch",
         save_strategy=Config.SAVE_STRATEGY,
@@ -174,7 +183,9 @@ def train_model(model, tokenizer, train_dataset, val_dataset, output_dir: str):
         push_to_hub=False,
         remove_unused_columns=True,
         report_to="none",  # Set to "wandb" if using Weights & Biases
-        fp16=torch.cuda.is_available(),
+        fp16=torch.cuda.is_available(),  # Use FP16 if GPU is available
+        dataloader_drop_last=True,  # Drop last incomplete batch
+        dataloader_num_workers=2  # Use multiple workers for data loading
     )
     
     # Create the Trainer

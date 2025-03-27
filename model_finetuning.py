@@ -73,19 +73,26 @@ def tokenize_function(examples, tokenizer):
     return inputs
 
 def load_model_and_tokenizer(model_path: str, base_model_name: str = Config.MODEL_NAME):
-    """Load the model and tokenizer, ensuring HF_TOKEN is provided."""
+    """Load the model and tokenizer, using HF_TOKEN if available."""
+    # Get HF token from environment
     hf_token = os.environ.get("HF_TOKEN")
-    if not hf_token:
-        raise EnvironmentError("Hugging Face token is required. Please set the HF_TOKEN environment variable.")
 
-    # Load tokenizer with authentication token
+    # Load tokenizer with authentication token if available
     try:
-        tokenizer = AutoTokenizer.from_pretrained(model_path, use_auth_token=hf_token)
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_path,
+            use_auth_token=hf_token if hf_token else None,
+            trust_remote_code=True
+        )
         print(f"Tokenizer loaded successfully from {model_path}")
     except Exception as e:
         print(f"Error loading tokenizer from {model_path}: {e}")
         try:
-            tokenizer = AutoTokenizer.from_pretrained(base_model_name, use_auth_token=hf_token)
+            tokenizer = AutoTokenizer.from_pretrained(
+                base_model_name,
+                use_auth_token=hf_token if hf_token else None,
+                trust_remote_code=True
+            )
             print(f"Fallback: Loaded tokenizer from base model {base_model_name}")
         except Exception as e:
             raise ImportError(f"Failed to load tokenizer: {e}")
@@ -94,13 +101,13 @@ def load_model_and_tokenizer(model_path: str, base_model_name: str = Config.MODE
     if tokenizer.pad_token is None:
         tokenizer.add_special_tokens({"pad_token": "[PAD]"})
 
-    # Load base model with authentication token
+    # Load base model with authentication token if available
     print(f"Loading base model {base_model_name} on {Config.DEVICE}")
     try:
         if torch.cuda.is_available():
             base_model = AutoModelForCausalLM.from_pretrained(
                 base_model_name,
-                use_auth_token=hf_token,
+                use_auth_token=hf_token if hf_token else None,
                 load_in_8bit=True,
                 device_map="auto",
                 trust_remote_code=True
@@ -109,7 +116,7 @@ def load_model_and_tokenizer(model_path: str, base_model_name: str = Config.MODE
         else:
             base_model = AutoModelForCausalLM.from_pretrained(
                 base_model_name,
-                use_auth_token=hf_token,
+                use_auth_token=hf_token if hf_token else None,
                 low_cpu_mem_usage=True,
                 torch_dtype=torch.float32,
                 trust_remote_code=True
@@ -143,7 +150,7 @@ def load_model_and_tokenizer(model_path: str, base_model_name: str = Config.MODE
         print("Attempting fallback: loading model without quantization...")
         base_model = AutoModelForCausalLM.from_pretrained(
             base_model_name,
-            use_auth_token=hf_token,
+            use_auth_token=hf_token if hf_token else None,
             low_cpu_mem_usage=True,
             torch_dtype=torch.float32,
             trust_remote_code=True

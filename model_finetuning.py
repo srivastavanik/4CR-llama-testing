@@ -8,7 +8,10 @@ import json
 import argparse
 import torch
 import numpy as np
-from datasets import Dataset
+try:
+    from datasets import Dataset
+except ImportError:
+    raise ImportError("The 'datasets' package is missing. Please install it by running: pip install datasets")
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
@@ -69,46 +72,88 @@ def tokenize_function(examples, tokenizer):
     
     return inputs
 
-def load_model_and_tokenizer(model_name: str, use_8bit: bool = False):
-    """Load the pre-trained model and tokenizer."""
-    # Load tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    
-    # Make sure pad token exists, or add it
-    if tokenizer.pad_token is None:
-        tokenizer.add_special_tokens({"pad_token": "[PAD]"})
-    
-    # Load model with quantization if specified, otherwise on CPU
-    if use_8bit and torch.cuda.is_available():
-        print("Using 8-bit quantization on GPU")
-        model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            load_in_8bit=True,
-            device_map="auto",
-            trust_remote_code=True
-        )
-        model = prepare_model_for_kbit_training(model)
-    else:
-        print(f"Loading model on {Config.DEVICE}")
-        model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            low_cpu_mem_usage=True,  # Helpful for CPU training
-            torch_dtype=torch.float32,  # Use float32 for CPU
-            trust_remote_code=True
-        ).to(Config.DEVICE)
-    
-    # Resize token embeddings to match tokenizer
-    original_vocab_size = model.get_input_embeddings().weight.size(0)
+def load_model_and_tokenizer(model_path: str, base_model_name: str = Config.MODEL_NAME):
+    """Load the model and tokenizer, ensuring HF_TOKEN is provided."""
+    hf_token = os.environ.get("HF_TOKEN")
+    if not hf_token:
+        raise EnvironmentError("Hugging Face token is required. Please set the HF_TOKEN environment variable.")
+
+    # Load tokenizer with authentication token
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(model_path, use_auth_token=hf_token)
+        print(f"Tokenizer loaded successfully from {model_path}")
+    except Exception as e:
+        print(f"Error loading tokenizer from {model_path}: {e}")
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(base_model_name, use_auth_token=hf_token)
+            print(f"Fallback: Loaded tokenizer from base model {base_model_name}")
+        except Exception as e:
+            raise ImportError(f"Failed to load tokenizer: {e}")
+
+    # Load base model with authentication token
+    print(f"Loading base model {base_model_name} on {Config.DEVICE}")
+    try:
+        if torch.cuda.is_available():
+            base_model = AutoModelForCausalLM.from_pretrained(
+                base_model_name,
+                use_auth_token=hf_token,
+                load_in_8bit=True,
+                device_map="auto",
+                trust_remote_code=True
+            )
+            base_model = prepare_model_for_kbit_training(base_model)
+        else:
+            base_model = AutoModelForCausalLM.from_pretrained(
+                base_model_name,
+                use_auth_token=hf_token,
+                low_cpu_mem_usage=True,
+                torch_dtype=torch.float32,
+                trust_remote_code=True
+            ).to(Config.DEVICE)
+    except Exception as e:
+        raise RuntimeError(f"Error loading base model: {e}")
+
+    # Resize token embeddings if necessary
+    original_vocab_size = base_model.get_input_embeddings().weight.size(0)
     tokenizer_vocab_size = len(tokenizer)
-    
     if original_vocab_size != tokenizer_vocab_size:
         print(f"Resizing token embeddings: {original_vocab_size} -> {tokenizer_vocab_size}")
-        model.resize_token_embeddings(tokenizer_vocab_size)
-    
-    # Ensure the model's vocab size matches the tokenizer's
-    assert model.get_input_embeddings().weight.size(0) == len(tokenizer)
-    assert model.get_output_embeddings().weight.size(0) == len(tokenizer)
-    
+        base_model.resize_token_embeddings(tokenizer_vocab_size)
+
+    # Ensure vocab sizes match for both input and output embeddings
+    assert base_model.get_input_embeddings().weight.size(0) == tokenizer_vocab_size, "Input embedding size does not match tokenizer vocab size"
+    assert base_model.get_output_embeddings().weight.size(0) == tokenizer_vocab_size, "Output embedding size does not match tokenizer vocab size"
+
+    # Load PEFT model components
+    try:
+        model = get_peft_model(base_model, LoraConfig(
+            task_type=TaskType.CAUSAL_LM,
+            r=Config.LORA_R,
+            lora_alpha=Config.LORA_ALPHA,
+            lora_dropout=Config.LORA_DROPOUT,
+            target_modules=Config.LORA_TARGET_MODULES,
+        ))
+        print("Successfully loaded PEFT model.")
+    except Exception as e:
+        print(f"Error loading PEFT model: {e}")
+        print("Attempting fallback: loading model without quantization...")
+        base_model = AutoModelForCausalLM.from_pretrained(
+            base_model_name,
+            use_auth_token=hf_token,
+            low_cpu_mem_usage=True,
+            torch_dtype=torch.float32,
+            trust_remote_code=True
+        ).to(Config.DEVICE)
+        base_model.resize_token_embeddings(tokenizer_vocab_size)
+        model = get_peft_model(base_model, LoraConfig(
+            task_type=TaskType.CAUSAL_LM,
+            r=Config.LORA_R,
+            lora_alpha=Config.LORA_ALPHA,
+            lora_dropout=Config.LORA_DROPOUT,
+            target_modules=Config.LORA_TARGET_MODULES,
+        ))
+
+    model.eval()
     return model, tokenizer
 
 def setup_lora(model):
@@ -248,13 +293,10 @@ def main():
     train_dataset, val_dataset = load_processed_data(args.data_dir)
     
     # Load model and tokenizer
-    model, tokenizer = load_model_and_tokenizer(args.model_name, args.use_8bit)
-    
-    # Setup LoRA
-    lora_model = setup_lora(model)
+    model, tokenizer = load_model_and_tokenizer(args.model_name)
     
     # Train model
-    trainer = train_model(lora_model, tokenizer, train_dataset, val_dataset, args.output_dir)
+    trainer = train_model(model, tokenizer, train_dataset, val_dataset, args.output_dir)
     
     return trainer
 

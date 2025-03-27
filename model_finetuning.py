@@ -90,6 +90,10 @@ def load_model_and_tokenizer(model_path: str, base_model_name: str = Config.MODE
         except Exception as e:
             raise ImportError(f"Failed to load tokenizer: {e}")
 
+    # Make sure pad token exists, or add it
+    if tokenizer.pad_token is None:
+        tokenizer.add_special_tokens({"pad_token": "[PAD]"})
+
     # Load base model with authentication token
     print(f"Loading base model {base_model_name} on {Config.DEVICE}")
     try:

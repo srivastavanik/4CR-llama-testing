@@ -15,10 +15,6 @@ from peft import PeftModel, prepare_model_for_kbit_training
 import evaluate
 from typing import Dict, List, Any
 from config import Config
-try:
-    from bitsandbytes.configs import BitsAndBytesConfig
-except ImportError:
-    from bitsandbytes import BitsAndBytesConfig
 import logging
 
 # Set up logging
@@ -62,8 +58,8 @@ def load_model_and_tokenizer(model_path: str, base_model_name: str = Config.MODE
     
     # Try different loading methods in order of preference
     loading_methods = [
-        ("8-bit quantization", True),
-        ("4-bit quantization", False),
+        ("8-bit quantization", "8bit"),
+        ("4-bit quantization", "4bit"),
         ("No quantization", None)
     ]
     
@@ -71,20 +67,26 @@ def load_model_and_tokenizer(model_path: str, base_model_name: str = Config.MODE
         try:
             logging.info(f"\nAttempting to load model with {method_name}...")
             
-            if quantize is not None:
-                # Create quantization config
-                quantization_config = BitsAndBytesConfig(
-                    load_in_8bit=quantize,
-                    llm_int8_threshold=6.0,
-                    llm_int8_has_fp16_weight=False
-                )
-                
+            if quantize == "8bit":
+                # Use load_in_8bit parameter directly
                 base_model = AutoModelForCausalLM.from_pretrained(
                     base_model_name,
-                    quantization_config=quantization_config,
+                    load_in_8bit=True,
                     device_map="auto",
                     trust_remote_code=True
                 )
+                # Prepare model for k-bit training
+                base_model = prepare_model_for_kbit_training(base_model)
+            elif quantize == "4bit":
+                # Use load_in_4bit parameter directly
+                base_model = AutoModelForCausalLM.from_pretrained(
+                    base_model_name,
+                    load_in_4bit=True,
+                    device_map="auto",
+                    trust_remote_code=True
+                )
+                # Prepare model for k-bit training
+                base_model = prepare_model_for_kbit_training(base_model)
             else:
                 # CPU-friendly loading
                 base_model = AutoModelForCausalLM.from_pretrained(
@@ -93,10 +95,6 @@ def load_model_and_tokenizer(model_path: str, base_model_name: str = Config.MODE
                     torch_dtype=torch.float32,
                     trust_remote_code=True
                 ).to(Config.DEVICE)
-            
-            # Prepare model for k-bit training if needed
-            if quantize:
-                base_model = prepare_model_for_kbit_training(base_model)
             
             # Resize token embeddings to match tokenizer
             original_vocab_size = base_model.get_input_embeddings().weight.size(0)

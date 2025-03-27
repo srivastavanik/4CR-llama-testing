@@ -12,16 +12,57 @@ from sklearn.model_selection import train_test_split
 from config import Config
 
 def load_data(file_path: str) -> pd.DataFrame:
-    """Load data from csv file."""
-    if file_path.endswith('.csv'):
-        return pd.read_csv(file_path)
-    elif file_path.endswith('.json'):
-        return pd.read_json(file_path, lines=True)
-    else:
-        raise ValueError(f"Unsupported file format: {file_path}")
+    """Load data from csv file with robust error handling."""
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"Data file not found: {file_path}")
+    
+    print(f"Loading data from {file_path}...")
+    try:
+        # First try to load with default settings
+        df = pd.read_csv(file_path, encoding='utf-8', on_bad_lines='warn')
+        print("Successfully loaded data with default settings")
+        return df
+    except pd.errors.ParserError as e:
+        print(f"Warning: Default CSV parsing failed: {e}")
+        print("Attempting alternative parsing methods...")
+        
+        try:
+            # Try with different quotechar and escapechar
+            df = pd.read_csv(
+                file_path,
+                encoding='utf-8',
+                on_bad_lines='warn',
+                quotechar='"',
+                escapechar='\\'
+            )
+            print("Successfully loaded data with alternative settings")
+            return df
+        except pd.errors.ParserError as e:
+            print(f"Warning: Alternative parsing failed: {e}")
+            print("Attempting to read file line by line...")
+            
+            # As a last resort, read line by line and clean data
+            lines = []
+            with open(file_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    try:
+                        # Try to parse line as CSV
+                        line = line.strip()
+                        if line:  # Skip empty lines
+                            lines.append(line)
+                    except Exception as e:
+                        print(f"Warning: Skipping malformed line: {e}")
+            
+            # Create DataFrame from cleaned lines
+            df = pd.DataFrame([line.split(',') for line in lines])
+            print(f"Successfully loaded data with {len(df)} rows")
+            return df
+    except Exception as e:
+        print(f"Error loading data: {e}")
+        raise
 
 def preprocess_data(df: pd.DataFrame) -> pd.DataFrame:
-    """Preprocess data for fine-tuning."""
+    """Preprocess data for fine-tuning with robust error handling."""
     # Check if all required columns exist
     required_columns = ["prompt", "context", "answer"]
     missing_columns = [col for col in required_columns if col not in df.columns]
@@ -31,13 +72,32 @@ def preprocess_data(df: pd.DataFrame) -> pd.DataFrame:
     # Drop rows with missing values in required columns
     df = df.dropna(subset=required_columns)
     
+    # Clean text data
+    def clean_text(text):
+        if pd.isna(text):
+            return ""
+        try:
+            text = str(text).strip()
+            # Remove any control characters
+            text = ''.join(c for c in text if ord(c) >= 32)
+            return text
+        except:
+            return ""
+    
+    # Clean all text columns
+    df[required_columns] = df[required_columns].applymap(clean_text)
+    
     # Handle the context column - if it contains list-like strings, parse them
     if df["context"].dtype == object and df["context"].iloc[0].startswith("["):
         import ast
-        df["context"] = df["context"].apply(lambda x: 
-            "\n\n".join(ast.literal_eval(x)) if isinstance(x, str) and x.startswith("[") 
-            else x
-        )
+        def parse_context(ctx):
+            try:
+                if isinstance(ctx, str) and ctx.startswith("["):
+                    return "\n\n".join(ast.literal_eval(ctx))
+                return ctx
+            except:
+                return ctx
+        df["context"] = df["context"].apply(parse_context)
     
     # Combine text and context if both exist
     if "text" in df.columns:
@@ -55,6 +115,9 @@ def preprocess_data(df: pd.DataFrame) -> pd.DataFrame:
         ),
         axis=1
     )
+    
+    # Drop any rows with empty text after cleaning
+    df = df[df["input_text"].str.strip().astype(bool)]
     
     return df[['input_text', 'answer', 'prompt', 'context']]
 

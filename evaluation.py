@@ -16,6 +16,10 @@ import evaluate
 from typing import Dict, List, Any
 from config import Config
 from bitsandbytes.configs import BitsAndBytesConfig
+import logging
+
+# Set up logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Load evaluation metrics
 bleu = evaluate.load("sacrebleu")
@@ -30,77 +34,92 @@ def load_test_data(test_file: str) -> Dataset:
     return test_dataset
 
 def load_model_and_tokenizer(model_path: str, base_model_name: str = Config.MODEL_NAME):
-    """Load the fine-tuned model and tokenizer with proper token embedding handling."""
+    """Load the fine-tuned model and tokenizer with comprehensive error handling."""
     # Load tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(model_path)
+        logging.info(f"Tokenizer loaded successfully from {model_path}")
+    except Exception as e:
+        logging.error(f"Error loading tokenizer: {e}")
+        try:
+            # Try loading from base model if fine-tuned tokenizer fails
+            tokenizer = AutoTokenizer.from_pretrained(base_model_name)
+            logging.info(f"Fallback: Using tokenizer from base model {base_model_name}")
+        except Exception as e:
+            logging.error(f"Error loading tokenizer from base model: {e}")
+            raise RuntimeError("Failed to load tokenizer")
     
     # Make sure pad token exists, or add it
     if tokenizer.pad_token is None:
         tokenizer.add_special_tokens({"pad_token": "[PAD]"})
     
     # Load base model with proper quantization
-    print(f"Loading model on {Config.DEVICE}")
-    if torch.cuda.is_available():
-        # Create quantization config
-        quantization_config = BitsAndBytesConfig(
-            load_in_8bit=True,
-            llm_int8_threshold=6.0,
-            llm_int8_has_fp16_weight=False
-        )
-        
-        base_model = AutoModelForCausalLM.from_pretrained(
-            base_model_name,
-            quantization_config=quantization_config,
-            device_map="auto",
-            trust_remote_code=True
-        )
-        
-        # Prepare model for k-bit training
-        base_model = prepare_model_for_kbit_training(base_model)
-    else:
-        # CPU-friendly loading
-        base_model = AutoModelForCausalLM.from_pretrained(
-            base_model_name,
-            low_cpu_mem_usage=True,
-            torch_dtype=torch.float32,
-            trust_remote_code=True
-        ).to(Config.DEVICE)
+    logging.info(f"Loading model on {Config.DEVICE}")
+    model = None
     
-    # Resize token embeddings to match tokenizer
-    original_vocab_size = base_model.get_input_embeddings().weight.size(0)
-    tokenizer_vocab_size = len(tokenizer)
+    # Try different loading methods in order of preference
+    loading_methods = [
+        ("8-bit quantization", True),
+        ("4-bit quantization", False),
+        ("No quantization", None)
+    ]
     
-    if original_vocab_size != tokenizer_vocab_size:
-        print(f"Resizing token embeddings: {original_vocab_size} -> {tokenizer_vocab_size}")
-        base_model.resize_token_embeddings(tokenizer_vocab_size)
+    for method_name, quantize in loading_methods:
+        try:
+            logging.info(f"\nAttempting to load model with {method_name}...")
+            
+            if quantize is not None:
+                # Create quantization config
+                quantization_config = BitsAndBytesConfig(
+                    load_in_8bit=quantize,
+                    llm_int8_threshold=6.0,
+                    llm_int8_has_fp16_weight=False
+                )
+                
+                base_model = AutoModelForCausalLM.from_pretrained(
+                    base_model_name,
+                    quantization_config=quantization_config,
+                    device_map="auto",
+                    trust_remote_code=True
+                )
+            else:
+                # CPU-friendly loading
+                base_model = AutoModelForCausalLM.from_pretrained(
+                    base_model_name,
+                    low_cpu_mem_usage=True,
+                    torch_dtype=torch.float32,
+                    trust_remote_code=True
+                ).to(Config.DEVICE)
+            
+            # Prepare model for k-bit training if needed
+            if quantize:
+                base_model = prepare_model_for_kbit_training(base_model)
+            
+            # Resize token embeddings to match tokenizer
+            original_vocab_size = base_model.get_input_embeddings().weight.size(0)
+            tokenizer_vocab_size = len(tokenizer)
+            
+            if original_vocab_size != tokenizer_vocab_size:
+                logging.info(f"Resizing token embeddings: {original_vocab_size} -> {tokenizer_vocab_size}")
+                base_model.resize_token_embeddings(tokenizer_vocab_size)
+            
+            # Ensure the model's vocab size matches the tokenizer's
+            assert base_model.get_input_embeddings().weight.size(0) == len(tokenizer)
+            assert base_model.get_output_embeddings().weight.size(0) == len(tokenizer)
+            
+            # Load PEFT model with LoRA adapters
+            model = PeftModel.from_pretrained(base_model, model_path)
+            logging.info(f"Successfully loaded model with {method_name}")
+            break
+            
+        except Exception as e:
+            logging.error(f"Failed to load model with {method_name}: {e}")
+            continue
     
-    # Ensure the model's vocab size matches the tokenizer's
-    assert base_model.get_input_embeddings().weight.size(0) == len(tokenizer)
-    assert base_model.get_output_embeddings().weight.size(0) == len(tokenizer)
-    
-    # Load PEFT model with LoRA adapters
-    try:
-        model = PeftModel.from_pretrained(base_model, model_path)
-    except Exception as e:
-        print(f"Error loading PEFT model: {e}")
-        print("Attempting to load model with different quantization settings...")
-        
-        # Try loading without quantization
-        base_model = AutoModelForCausalLM.from_pretrained(
-            base_model_name,
-            low_cpu_mem_usage=True,
-            torch_dtype=torch.float32,
-            trust_remote_code=True
-        ).to(Config.DEVICE)
-        
-        # Resize token embeddings again
-        base_model.resize_token_embeddings(tokenizer_vocab_size)
-        
-        # Try loading PEFT model again
-        model = PeftModel.from_pretrained(base_model, model_path)
+    if model is None:
+        raise RuntimeError("Failed to load model using all available methods")
     
     model.eval()
-    
     return model, tokenizer
 
 def generate_answer(model, tokenizer, prompt: str, max_length: int = 512):
@@ -143,41 +162,60 @@ def calculate_exact_match(predictions: List[str], references: List[str]) -> floa
     return exact_matches / len(predictions) if predictions else 0
 
 def evaluate_model(model, tokenizer, test_dataset: Dataset):
-    """Evaluate the model on test data and calculate metrics."""
+    """Evaluate the model on test data with error handling."""
     predictions = []
     references = []
+    failed_predictions = 0
     
-    print("Generating predictions...")
+    logging.info("Generating predictions...")
     for example in tqdm(test_dataset):
         prompt = example["input_text"]
         reference = example["answer"]
         
-        prediction = generate_answer(model, tokenizer, prompt)
-        predictions.append(prediction)
-        references.append(reference)
+        try:
+            prediction = generate_answer(model, tokenizer, prompt)
+            predictions.append(prediction)
+            references.append(reference)
+        except Exception as e:
+            logging.warning(f"Failed to generate prediction for prompt: {prompt[:50]}... Error: {e}")
+            failed_predictions += 1
+            continue
+    
+    if failed_predictions > 0:
+        logging.warning(f"Failed to generate predictions for {failed_predictions} examples")
+    
+    if not predictions:
+        raise RuntimeError("No successful predictions generated")
     
     # Calculate metrics
-    print("Calculating evaluation metrics...")
+    logging.info("\nCalculating evaluation metrics...")
     
-    # BLEU score
-    bleu_results = bleu.compute(predictions=predictions, references=[[r] for r in references])
-    
-    # ROUGE score
-    rouge_results = rouge.compute(predictions=predictions, references=references)
-    
-    # Exact match score
-    exact_match_score = calculate_exact_match(predictions, references)
-    
-    # Compile results
-    evaluation_results = {
-        "bleu": bleu_results["score"],
-        "rouge1": rouge_results["rouge1"],
-        "rouge2": rouge_results["rouge2"],
-        "rougeL": rouge_results["rougeL"],
-        "exact_match": exact_match_score
-    }
-    
-    return evaluation_results, predictions
+    try:
+        # BLEU score
+        bleu_results = bleu.compute(predictions=predictions, references=[[r] for r in references])
+        
+        # ROUGE score
+        rouge_results = rouge.compute(predictions=predictions, references=references)
+        
+        # Exact match score
+        exact_match_score = calculate_exact_match(predictions, references)
+        
+        # Compile results
+        evaluation_results = {
+            "bleu": bleu_results["score"],
+            "rouge1": rouge_results["rouge1"],
+            "rouge2": rouge_results["rouge2"],
+            "rougeL": rouge_results["rougeL"],
+            "exact_match": exact_match_score,
+            "failed_predictions": failed_predictions,
+            "total_predictions": len(predictions)
+        }
+        
+        return evaluation_results, predictions
+        
+    except Exception as e:
+        logging.error(f"Error calculating metrics: {e}")
+        raise
 
 def compare_with_baseline(eval_results: Dict[str, Any], baseline_results: Dict[str, Any]):
     """Compare fine-tuned model results with baseline model results."""
@@ -224,7 +262,7 @@ def save_evaluation_results(
     with open(os.path.join(output_dir, "predictions.json"), "w") as f:
         json.dump(prediction_data, f, indent=2)
     
-    print(f"Evaluation results saved to {output_dir}")
+    logging.info(f"Evaluation results saved to {output_dir}")
 
 def main():
     parser = argparse.ArgumentParser(description="Evaluate fine-tuned LLM on Q&A tasks")
@@ -262,36 +300,36 @@ def main():
     args = parser.parse_args()
     
     # Load test data
-    print(f"Loading test data from {args.test_data}...")
+    logging.info(f"Loading test data from {args.test_data}...")
     test_dataset = load_test_data(args.test_data)
     
     # Load model and tokenizer
-    print(f"Loading fine-tuned model from {args.model_path}...")
+    logging.info(f"Loading fine-tuned model from {args.model_path}...")
     model, tokenizer = load_model_and_tokenizer(args.model_path, args.base_model)
     
     # Evaluate model
-    print("Evaluating model...")
+    logging.info("Evaluating model...")
     evaluation_results, predictions = evaluate_model(model, tokenizer, test_dataset)
     
     # Display results
-    print("\nEvaluation Results:")
+    logging.info("\nEvaluation Results:")
     for metric, value in evaluation_results.items():
-        print(f"{metric}: {value}")
+        logging.info(f"{metric}: {value}")
     
     # Compare with baseline if provided
     if args.baseline_results:
-        print(f"\nComparing with baseline results from {args.baseline_results}...")
+        logging.info(f"\nComparing with baseline results from {args.baseline_results}...")
         with open(args.baseline_results, 'r') as f:
             baseline_results = json.load(f)
         
         comparison = compare_with_baseline(evaluation_results, baseline_results)
         
-        print("\nComparison with Baseline:")
+        logging.info("\nComparison with Baseline:")
         for metric, comp_data in comparison.items():
-            print(f"{metric}:")
-            print(f"  Baseline: {comp_data['baseline']}")
-            print(f"  Fine-tuned: {comp_data['fine_tuned']}")
-            print(f"  Improvement: {comp_data['improvement']} ({comp_data['improvement_percent']:.2f}%)")
+            logging.info(f"{metric}:")
+            logging.info(f"  Baseline: {comp_data['baseline']}")
+            logging.info(f"  Fine-tuned: {comp_data['fine_tuned']}")
+            logging.info(f"  Improvement: {comp_data['improvement']} ({comp_data['improvement_percent']:.2f}%)")
         
         # Add comparison to evaluation results
         evaluation_results["baseline_comparison"] = comparison

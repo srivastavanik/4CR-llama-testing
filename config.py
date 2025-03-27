@@ -15,8 +15,8 @@ Context: {context}"""
     LEARNING_RATE = 1e-4
     WEIGHT_DECAY = 0.01
     NUM_EPOCHS = 1  # Keep at 1 for initial run
-    BATCH_SIZE = 4  # Increased for GPU training
-    GRADIENT_ACCUMULATION_STEPS = 2  # Reduced for GPU training
+    BATCH_SIZE = 2  # Reduced for better memory management
+    GRADIENT_ACCUMULATION_STEPS = 4  # Increased to compensate for smaller batch size
     WARMUP_STEPS = 50
     LOGGING_STEPS = 5
     SAVE_STRATEGY = "epoch"

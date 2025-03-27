@@ -54,7 +54,7 @@ def tokenize_function(examples, tokenizer):
         examples["answer"],
         padding="max_length",
         truncation=True,
-        max_length=Config.MAX_TARGET_LENGTH,
+        max_length=Config.MAX_LENGTH,  # Changed to match input length
         return_tensors="pt"
     )
     
